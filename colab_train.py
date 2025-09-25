@@ -71,26 +71,31 @@ def train_epoch(model, dataloader, criterion, optimizer, device, epoch):
     pbar = tqdm(dataloader, desc=f'Epoch {epoch}')
     
     for batch_idx, batch in enumerate(pbar):
-        # Move data to device
-        volumes = {}
-        for modality in ['CT', 'PET']:
-            if modality in batch['volumes']:
-                volumes[modality] = batch['volumes'][modality].to(device)
+        # New format: modalities are direct keys in batch
+        model_input = {}
         
-        # Create dummy labels (replace with real labels from clinical data)
-        batch_size = list(volumes.values())[0].size(0)
+        # Extract modality tensors and move to device
+        for key, value in batch.items():
+            if isinstance(value, torch.Tensor) and key not in ['patient_id', 'session_id']:
+                model_input[key] = value.to(device)
+        
+        if batch_idx == 0:
+            print(f"Available modalities: {list(model_input.keys())}")
+            for mod, tensor in model_input.items():
+                print(f"{mod}: {tensor.shape}")
+        
+        if not model_input:
+            print(f"Skipping batch {batch_idx} - no modality tensors found")
+            continue
+            
+        # Create dummy labels
+        batch_size = list(model_input.values())[0].size(0)
         labels = torch.randint(0, 2, (batch_size,)).to(device)
         
         # Forward pass
         optimizer.zero_grad()
-        
-        # Prepare input for model
-        model_input = {'volumes': volumes}
-        outputs = model(model_input)
-        
+        outputs = model(model_input)  
         loss = criterion(outputs, labels)
-        
-        # Backward pass
         loss.backward()
         optimizer.step()
         
@@ -100,19 +105,16 @@ def train_epoch(model, dataloader, criterion, optimizer, device, epoch):
         total += labels.size(0)
         correct += (predicted == labels).sum().item()
         
-        # Update progress bar
         pbar.set_postfix({
             'Loss': f'{loss.item():.4f}',
             'Acc': f'{100.*correct/total:.2f}%'
         })
         
-        # Clear GPU cache periodically
         if batch_idx % 10 == 0:
             torch.cuda.empty_cache()
     
     epoch_loss = running_loss / len(dataloader)
     epoch_acc = 100. * correct / total
-    
     return epoch_loss, epoch_acc
 
 def validate(model, dataloader, criterion, device):
@@ -124,17 +126,19 @@ def validate(model, dataloader, criterion, device):
     
     with torch.no_grad():
         for batch in tqdm(dataloader, desc='Validation'):
-            volumes = {}
-            for modality in ['CT', 'PET']:
-                if modality in batch['volumes']:
-                    volumes[modality] = batch['volumes'][modality].to(device)
+            # Extract modality tensors
+            model_input = {}
+            for key, value in batch.items():
+                if isinstance(value, torch.Tensor) and key not in ['patient_id', 'session_id']:
+                    model_input[key] = value.to(device)
             
-            batch_size = list(volumes.values())[0].size(0)
-            labels = torch.randint(0, 2, (batch_size,)).to(device)  # Dummy labels
+            if not model_input:
+                continue
+                
+            batch_size = list(model_input.values())[0].size(0)
+            labels = torch.randint(0, 2, (batch_size,)).to(device)
             
-            model_input = {'volumes': volumes}
             outputs = model(model_input)
-            
             loss = criterion(outputs, labels)
             val_loss += loss.item()
             
@@ -144,7 +148,6 @@ def validate(model, dataloader, criterion, device):
     
     val_loss /= len(dataloader)
     val_acc = 100. * correct / total
-    
     return val_loss, val_acc
 
 def save_checkpoint(model, optimizer, epoch, loss, checkpoint_dir):
