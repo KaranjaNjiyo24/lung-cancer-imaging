@@ -94,7 +94,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, epoch):
         
         # Forward pass
         optimizer.zero_grad()
-        outputs = model(model_input)  # Direct input to model
+        outputs = model(model_input)  
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
