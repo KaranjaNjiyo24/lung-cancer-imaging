@@ -155,31 +155,33 @@ class NestedDICOMDataset(Dataset):
     def _load_single_sample(self, sample: SeriesSample) -> Dict[str, object]:
         volume = self._volume_loader(sample.dicom_files)
         volume = self._apply_transform(volume, sample.metadata)
+        modality_key = sample.modality.lower()
         return {
             "patient_id": sample.patient_id,
             "session_id": sample.session_id,
-            "modality": sample.modality,
+            "modality": modality_key,
             "series_id": sample.series_id,
-            "volume": volume,
+            modality_key: volume,
             "metadata": sample.metadata,
         }
 
     # ------------------------------------------------------------------
     def _load_multimodal_sample(self, sample: Dict[str, object]) -> Dict[str, object]:
         modalities = sample["series"]  # type: ignore[index]
-        volumes: Dict[str, np.ndarray] = {}
-        metadata: Dict[str, Dict[str, object]] = {}
+        model_input: Dict[str, np.ndarray] = {}
+        metadata_output: Dict[str, Dict[str, object]] = {}
         for modality, series_sample in modalities.items():
             series_sample = series_sample  # type: ignore[assignment]
             volume = self._volume_loader(series_sample.dicom_files)
             volume = self._apply_transform(volume, series_sample.metadata)
-            volumes[modality] = volume
-            metadata[modality] = series_sample.metadata
+            modality_key = modality.lower()
+            model_input[modality_key] = volume
+            metadata_output[modality_key] = series_sample.metadata
         return {
             "patient_id": sample["patient_id"],
             "session_id": sample["session_id"],
-            "volumes": volumes,
-            "metadata": metadata,
+            **model_input,
+            "metadata": metadata_output,
         }
 
     # ------------------------------------------------------------------
