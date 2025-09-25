@@ -1,0 +1,38 @@
+# Training Configuration
+data:
+  root_path: "/content/drive/MyDrive/NSCLC_Dataset"
+  metadata_csv: "/content/drive/MyDrive/metadata.csv"
+  image_size: [128, 128, 64]  # [H, W, D] - adjust based on GPU memory
+  batch_size: 2  # Start small for 98GB dataset
+  num_workers: 2
+  pin_memory: true
+
+model:
+  architecture: "multimodal_resnet3d"
+  num_classes: 2  # Adjust based on your classification task
+  hidden_dim: 512
+  dropout: 0.3
+
+training:
+  epochs: 50
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  optimizer: "adam"
+  scheduler: "cosine"
+  patience: 10  # Early stopping patience
+  
+  # Checkpointing
+  save_every: 5  # Save checkpoint every N epochs
+  checkpoint_dir: "/content/drive/MyDrive/checkpoints"
+
+augmentation:
+  enabled: true
+  rotation_range: 10  # degrees
+  scaling_range: 0.1
+  intensity_shift: 0.1
+  noise_std: 0.05
+
+logging:
+  level: "INFO"
+  log_dir: "logs"
+  use_wandb: false  # Set to true if using wandb

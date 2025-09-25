@@ -1,0 +1,33 @@
+# Core dependencies
+torch>=1.9.0
+torchvision>=0.10.0
+numpy>=1.21.0
+pandas>=1.3.0
+scikit-learn>=1.0.0
+
+# Medical imaging
+pydicom>=2.3.0
+SimpleITK>=2.1.0
+nibabel>=3.2.0
+
+# MONAI for medical imaging
+monai>=0.9.0
+
+# Utilities
+tqdm>=4.62.0
+matplotlib>=3.4.0
+seaborn>=0.11.0
+opencv-python>=4.5.0
+Pillow>=8.3.0
+pyyaml>=6.0
+
+# Testing
+pytest>=6.2.0
+psutil>=5.8.0
+
+# Optional: Experiment tracking
+# wandb>=0.12.0
+# tensorboard>=2.7.0
+
+# Google Colab integration
+# google-colab
