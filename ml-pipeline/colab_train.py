@@ -16,7 +16,9 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import numpy as np
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import classification_report, confusion_matrix
+from torch.cuda.amp import autocast, GradScaler
+
 
 def setup_colab_environment():
     """Setup Colab-specific configurations"""
@@ -172,99 +174,106 @@ def train_epoch_dummy(model, dataloader, criterion, optimizer, device, epoch, nu
     return epoch_loss, epoch_acc
 
 # Updated training function with real labels
-def train_epoch_with_real_labels(model, dataloader, criterion, optimizer, device, epoch, patient_labels, target_type='survival'):
-    """Train for one epoch using real clinical labels"""
+def train_epoch_with_real_labels(model, dataloader, criterion, optimizer, device, epoch, patient_labels, target_type='survival', scaler=None):
     model.train()
-    running_loss = 0.0
-    correct = 0
-    total = 0
-    skipped = 0
-    
+    running_loss, correct, total, skipped = 0.0, 0, 0, 0
+
     pbar = tqdm(dataloader, desc=f'Epoch {epoch}')
-    
+
     for batch_idx, batch in enumerate(pbar):
-        # Extract modality tensors
         model_input = {}
         for key, value in batch.items():
             if isinstance(value, torch.Tensor) and key in ['ct', 'pet']:
-                model_input[key] = value.to(device)
-        
+                model_input[key] = value.to(device, non_blocking=False)
+
         if not model_input:
             skipped += 1
             continue
-        
-        # Get real labels from clinical data
+
+        # Labels
         patient_ids = batch['patient_id']
         batch_labels = []
-        
         for pid in patient_ids:
             label = get_patient_label(pid, patient_labels, target_type)
-            if label is not None:
-                batch_labels.append(label)
-            else:
-                batch_labels.append(0)  # Default for missing labels
-        
-        labels = torch.tensor(batch_labels, dtype=torch.long).to(device)
-        
-        # Forward pass
-        optimizer.zero_grad()
-        outputs = model(model_input)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
-        
-        # Statistics
+            batch_labels.append(0 if label is None else int(label))
+        labels = torch.tensor(batch_labels, dtype=torch.long, device=device)
+
+        optimizer.zero_grad(set_to_none=True)
+
+        with autocast(enabled=torch.cuda.is_available()):
+            outputs = model(model_input)
+            loss = criterion(outputs, labels)
+
+        # AMP backward
+        if scaler is not None and torch.cuda.is_available():
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
+
         running_loss += loss.item()
         _, predicted = torch.max(outputs.data, 1)
         total += labels.size(0)
         correct += (predicted == labels).sum().item()
-        
-        pbar.set_postfix({
-            'Loss': f'{loss.item():.4f}',
-            'Acc': f'{100.*correct/total:.2f}%',
-            'Skipped': skipped
-        })
-        
-        if batch_idx % 10 == 0:
+
+        pbar.set_postfix({'Loss': f'{loss.item():.4f}', 'Acc': f'{100. * correct / max(1, total):.2f}%', 'Skipped': skipped})
+
+        if batch_idx % 10 == 0 and torch.cuda.is_available():
             torch.cuda.empty_cache()
-    
-    epoch_loss = running_loss / max(1, len(dataloader) - skipped)
+
+    denom = max(1, len(dataloader) - skipped)
+    epoch_loss = running_loss / denom
     epoch_acc = 100. * correct / max(1, total)
-    
     return epoch_loss, epoch_acc
 
-def validate(model, dataloader, criterion, device):
-    """Validation loop"""
+
+def validate(model, dataloader, criterion, device, patient_labels=None, target_type='survival'):
     model.eval()
-    val_loss = 0.0
-    correct = 0
-    total = 0
-    
+    val_loss, correct, total = 0.0, 0, 0
+    all_true, all_pred = [], []
+
     with torch.no_grad():
         for batch in tqdm(dataloader, desc='Validation'):
-            # Extract modality tensors directly
             model_input = {}
             for key, value in batch.items():
                 if isinstance(value, torch.Tensor) and key in ['ct', 'pet']:
-                    model_input[key] = value.to(device)
-            
+                    model_input[key] = value.to(device, non_blocking=False)
             if not model_input:
                 continue
-                
-            batch_size = list(model_input.values())[0].size(0)
-            labels = torch.randint(0, 2, (batch_size,)).to(device)
-            
-            outputs = model(model_input)
-            loss = criterion(outputs, labels)
+
+            # labels
+            if patient_labels is not None:
+                patient_ids = batch['patient_id']
+                batch_labels = []
+                for pid in patient_ids:
+                    label = get_patient_label(pid, patient_labels, target_type)
+                    batch_labels.append(0 if label is None else int(label))
+                labels = torch.tensor(batch_labels, dtype=torch.long, device=device)
+            else:
+                batch_size = list(model_input.values())[0].size(0)
+                labels = torch.randint(0, 2, (batch_size,), device=device)
+
+            with autocast(enabled=torch.cuda.is_available()):
+                outputs = model(model_input)
+                loss = criterion(outputs, labels)
+
             val_loss += loss.item()
-            
             _, predicted = torch.max(outputs, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
-    
-    val_loss /= len(dataloader)
-    val_acc = 100. * correct / total
-    return val_loss, val_acc
+
+            all_true.extend(labels.detach().cpu().tolist())
+            all_pred.extend(predicted.detach().cpu().tolist())
+
+    val_loss /= max(1, len(dataloader))
+    val_acc = 100. * correct / max(1, total)
+
+    report = classification_report(all_true, all_pred, output_dict=False, digits=4)
+    cm = confusion_matrix(all_true, all_pred)
+    return val_loss, val_acc, report, cm
+
 
 def save_checkpoint(model, optimizer, epoch, loss, checkpoint_dir):
     """Save model checkpoint"""
@@ -405,6 +414,9 @@ def main():
         weight_decay=config['training'].get('weight_decay', 0)
     )
     
+    scaler = GradScaler(enabled=torch.cuda.is_available())
+    torch.set_float32_matmul_precision("high")
+
     # Learning rate scheduler
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=config['training']['epochs']
@@ -438,6 +450,7 @@ def main():
                 epoch + 1,
                 patient_labels,
                 target_type,
+                scaler=scaler,
             )
         else:
             train_loss, train_acc = train_epoch_dummy(
@@ -451,17 +464,26 @@ def main():
             )
         
         # Validation
-        val_loss, val_acc = validate(model, val_loader, criterion, device)
-        
+        val_loss, val_acc, val_report, val_cm = validate(
+            model,
+            val_loader,
+            criterion,
+            device,
+            patient_labels=patient_labels,
+            target_type=target_type,
+        )
+
         # Learning rate scheduler step
         scheduler.step()
-        
+
         # Print epoch results
         print(f"📊 Epoch {epoch+1} Results:")
         print(f"   Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
-        print(f"   Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
+        print(f"   Val   Loss: {val_loss:.4f} | Val   Acc: {val_acc:.2f}%")
+        print("   Confusion Matrix:\n", val_cm)
+        print("   Classification Report:\n", val_report)
         print(f"   Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
-        
+
         # Save best model
         if val_acc > best_val_acc:
             best_val_acc = val_acc
