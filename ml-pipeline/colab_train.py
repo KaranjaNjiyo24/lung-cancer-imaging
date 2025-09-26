@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import numpy as np
 from sklearn.metrics import classification_report, confusion_matrix
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 
 
 def setup_colab_environment():
@@ -200,12 +200,12 @@ def train_epoch_with_real_labels(model, dataloader, criterion, optimizer, device
 
         optimizer.zero_grad(set_to_none=True)
 
-        with autocast(enabled=torch.cuda.is_available()):
+        with autocast('cuda', enabled=torch.cuda.is_available()):
             outputs = model(model_input)
             loss = criterion(outputs, labels)
 
         # AMP backward
-        if scaler is not None and torch.cuda.is_available():
+        if scaler is not None and scaler.is_enabled():
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -255,7 +255,7 @@ def validate(model, dataloader, criterion, device, patient_labels=None, target_t
                 batch_size = list(model_input.values())[0].size(0)
                 labels = torch.randint(0, 2, (batch_size,), device=device)
 
-            with autocast(enabled=torch.cuda.is_available()):
+            with autocast('cuda', enabled=torch.cuda.is_available()):
                 outputs = model(model_input)
                 loss = criterion(outputs, labels)
 
@@ -348,6 +348,7 @@ def main():
             metadata_csv_path=args.metadata_csv,
             modalities=["CT", "PET"],
             pair_modalities=True,
+            image_size=config['data'].get('image_size', [64, 64, 32]),
             lazy=True
         )
         
@@ -414,7 +415,7 @@ def main():
         weight_decay=config['training'].get('weight_decay', 0)
     )
     
-    scaler = GradScaler(enabled=torch.cuda.is_available())
+    scaler = GradScaler(device='cuda', enabled=torch.cuda.is_available())
     torch.set_float32_matmul_precision("high")
 
     # Learning rate scheduler

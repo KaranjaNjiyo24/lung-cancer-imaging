@@ -43,12 +43,140 @@ try:  # pragma: no cover - optional dependency
 except ImportError:  # pragma: no cover
     pydicom = None  # type: ignore
 
+try:  # pragma: no cover - optional dependency
+    import SimpleITK as sitk
+except ImportError:  # pragma: no cover
+    sitk = None  # type: ignore
+
 from .metadata_handler import NSCLCMetadataHandler
 
 LOGGER = logging.getLogger(__name__)
 
 # Type alias for a callable that converts a list of DICOM paths to an array-like
 VolumeLoader = Callable[[List[Path]], np.ndarray]
+
+
+def _is_localizer(dcm) -> bool:
+    """Return True when a DICOM slice looks like a localizer/scout."""
+    sd = str(getattr(dcm, "SeriesDescription", "") or "").lower()
+    image_type_raw = getattr(dcm, "ImageType", [])
+    if isinstance(image_type_raw, str):
+        it = [part.strip().lower() for part in image_type_raw.split("\") if part]
+    else:
+        it = [str(part).lower() for part in image_type_raw]
+    return (
+        "localizer" in sd
+        or "scout" in sd
+        or "survey" in sd
+        or "localizer" in it
+        or "scout" in it
+    )
+
+
+def _read_series_with_sitk(file_list: Sequence[Path]) -> "sitk.Image":
+    """Load a DICOM series with SimpleITK, applying CT slope/intercept."""
+    if sitk is None:
+        raise ImportError("SimpleITK is required to read DICOM series. Install SimpleITK.")
+    if pydicom is None:
+        raise ImportError("pydicom is required to sort DICOM slices. Install pydicom.")
+    if not file_list:
+        raise ValueError("Empty DICOM file list provided")
+
+    def _sort_key(fp: Path) -> float:
+        try:
+            ds = pydicom.dcmread(str(fp), stop_before_pixels=True, force=True)
+            if hasattr(ds, "ImagePositionPatient") and len(ds.ImagePositionPatient) >= 3:
+                return float(ds.ImagePositionPatient[2])
+            if hasattr(ds, "InstanceNumber"):
+                return float(ds.InstanceNumber)
+        except Exception:
+            pass
+        # fall back to filename ordering if headers are missing
+        return 0.0
+
+    sorted_files = sorted(file_list, key=_sort_key)
+
+    filtered_files: List[Path] = []
+    for fp in sorted_files:
+        try:
+            ds = pydicom.dcmread(str(fp), stop_before_pixels=True, force=True)
+            if not _is_localizer(ds):
+                filtered_files.append(fp)
+        except Exception:
+            # keep slices with unreadable headers so the reader can decide
+            filtered_files.append(fp)
+    if len(filtered_files) >= 8:
+        sorted_files = filtered_files
+
+    reader = sitk.ImageSeriesReader()
+    reader.SetFileNames([str(fp) for fp in sorted_files])
+    img = reader.Execute()
+    return img
+
+
+def _center_pad_or_crop_axis(volume: np.ndarray, target: int, axis: int) -> np.ndarray:
+    """Center pad or crop ``volume`` along ``axis`` to ``target`` length."""
+    current = volume.shape[axis]
+    if current == target:
+        return volume
+    if current > target:
+        start = (current - target) // 2
+        stop = start + target
+        slicers = [slice(None)] * volume.ndim
+        slicers[axis] = slice(start, stop)
+        return volume[tuple(slicers)]
+    pad_total = target - current
+    pad_before = pad_total // 2
+    pad_after = pad_total - pad_before
+    pad_width = [(0, 0)] * volume.ndim
+    pad_width[axis] = (pad_before, pad_after)
+    return np.pad(volume, pad_width, mode="constant", constant_values=0)
+
+
+def _center_crop_or_pad_3d(volume: np.ndarray, target_shape: Sequence[int]) -> np.ndarray:
+    result = volume
+    for axis, target in enumerate(target_shape):
+        result = _center_pad_or_crop_axis(result, int(target), axis)
+    return result
+
+
+def _resample_to_target(
+    img: "sitk.Image",
+    target_size: Sequence[int] = (32, 64, 64),
+    target_spacing: Optional[Sequence[float]] = None,
+) -> np.ndarray:
+    """Resample ``img`` to ``target_size`` (D, H, W) and return a normalised array."""
+    if sitk is None:
+        raise ImportError("SimpleITK is required to resample DICOM volumes. Install SimpleITK.")
+
+    if target_spacing is None:
+        target_spacing = (1.5, 1.5, 3.0)
+
+    spacing = np.array(img.GetSpacing(), dtype=np.float32)
+    size = np.array(img.GetSize(), dtype=np.int32)
+    physical_extent = spacing * size
+
+    target_spacing_arr = np.array(target_spacing, dtype=np.float32)
+    new_size_xyz = np.maximum(1, np.round(physical_extent / target_spacing_arr).astype(int))
+
+    resampler = sitk.ResampleImageFilter()
+    resampler.SetInterpolator(sitk.sitkLinear)
+    resampler.SetOutputSpacing(tuple(float(s) for s in target_spacing_arr))
+    resampler.SetSize([int(v) for v in new_size_xyz])
+    resampler.SetOutputDirection(img.GetDirection())
+    resampler.SetOutputOrigin(img.GetOrigin())
+    resampler.SetDefaultPixelValue(-1024)
+
+    resampled = resampler.Execute(img)
+    volume = sitk.GetArrayFromImage(resampled)  # (D, H, W)
+
+    volume = np.clip(volume, -1000.0, 400.0)
+    volume = (volume + 1000.0) / 1400.0  # scale roughly to [0, 1]
+
+    target_d, target_h, target_w = [int(dim) for dim in target_size]
+    volume = _center_crop_or_pad_3d(volume, (target_d, target_h, target_w))
+
+    return volume.astype(np.float32)[None, ...]
 
 
 @dataclass
@@ -95,6 +223,9 @@ class NestedDICOMDataset(Dataset):
         Optional callable responsible for reading the DICOM files.  Defaults to
         a loader backed by ``pydicom``; provide a custom implementation to use a
         different backend or to enable caching.
+    image_size:
+        Desired output volume dimensions ordered as ``[width, height, depth]``.
+        Used by the default loader to resample volumes to a consistent shape.
     lazy:
         When ``True`` only file paths are stored during indexing (recommended
         for large datasets).  Setting to ``False`` would enable eager loading but
@@ -111,6 +242,7 @@ class NestedDICOMDataset(Dataset):
         required_modalities: Optional[Sequence[str]] = None,
         transform: Optional[Callable[..., np.ndarray]] = None,
         volume_loader: Optional[VolumeLoader] = None,
+        image_size: Optional[Sequence[int]] = None,
         lazy: bool = True,
     ) -> None:
         self.root_dir = Path(root_dir)
@@ -129,6 +261,13 @@ class NestedDICOMDataset(Dataset):
         self.required_modalities = {m.upper() for m in required_modalities} if required_modalities else set()
         self.pair_modalities = pair_modalities
         self.transform = transform
+
+        if image_size is None:
+            image_size = (64, 64, 32)
+        if len(image_size) != 3:
+            raise ValueError("image_size must contain exactly three spatial dimensions [W, H, D]")
+        self.image_size = tuple(int(dim) for dim in image_size)
+
         self._volume_loader = volume_loader or self._default_volume_loader
         self.lazy = lazy
         if not lazy:
@@ -349,40 +488,29 @@ class NestedDICOMDataset(Dataset):
         return candidates[0]
 
     # ------------------------------------------------------------------
-    @staticmethod
-    def _default_volume_loader(dicom_files: List[Path]) -> np.ndarray:
+    def _default_volume_loader(self, dicom_files: List[Path]) -> np.ndarray:
+        if sitk is None:
+            raise ImportError(
+                "SimpleITK is required for the default volume loader. Install SimpleITK or provide a custom loader."
+            )
         if pydicom is None:
             raise ImportError(
-                "pydicom is not installed. Provide a custom volume_loader or install pydicom."
+                "pydicom is required for the default volume loader. Install pydicom or provide a custom loader."
             )
+        if not dicom_files:
+            raise ValueError("No DICOM files provided for volume loading")
 
-        slices = []
-        for path in dicom_files:
-            try:
-                dataset = pydicom.dcmread(str(path), stop_before_pixels=False)
-                pixel_array = dataset.pixel_array
-            except Exception as exc:  # pragma: no cover - defensive logging
-                LOGGER.warning("Failed to read DICOM file %s: %s", path, exc)
-                continue
-
-            instance_number = getattr(dataset, "InstanceNumber", None)
-            image_position = getattr(dataset, "ImagePositionPatient", None)
-            slices.append((instance_number, image_position, pixel_array))
-
-        if not slices:
-            raise ValueError("No readable DICOM slices found for series")
-
-        slices.sort(key=_slice_sort_key)
-        volume = np.stack([slc[2] for slc in slices]).astype(np.float32)
-        return volume
-
-
-# ----------------------------------------------------------------------
-def _slice_sort_key(item: Tuple[Optional[int], Optional[Sequence[float]], np.ndarray]) -> Tuple[float, float]:
-    instance_number, image_position, _ = item
-    instance_val = float(instance_number) if instance_number is not None else float("inf")
-    z_position = float(image_position[2]) if image_position is not None and len(image_position) >= 3 else float("inf")
-    return instance_val, z_position
+        try:
+            sitk_img = _read_series_with_sitk(dicom_files)
+            target_size = (
+                int(self.image_size[2]),
+                int(self.image_size[1]),
+                int(self.image_size[0]),
+            )
+            volume = _resample_to_target(sitk_img, target_size=target_size)
+            return volume
+        except Exception as exc:
+            raise RuntimeError(f"Failed to build volume from DICOM series: {exc}") from exc
 
 
 __all__ = ["NestedDICOMDataset", "NSCLCMetadataHandler", "SeriesSample"]
