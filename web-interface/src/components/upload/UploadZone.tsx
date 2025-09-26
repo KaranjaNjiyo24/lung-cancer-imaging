@@ -41,9 +41,16 @@ export function UploadZone({ label, description, accept = '.dcm,.dicom', onFiles
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      <input type="file" accept={accept} multiple className="hidden" onChange={(event) => onFilesSelected(event.target.files)} />
+      <input
+        type="file"
+        accept={accept}
+        multiple
+        className="hidden"
+        onChange={(event) => onFilesSelected(event.target.files)}
+        aria-labelledby="upload-zone-label"
+      />
       <div className="text-primary-blue">{icon}</div>
-      <h3 className="text-lg font-semibold text-primary-navy">{label}</h3>
+      <h3 id="upload-zone-label" className="text-lg font-semibold text-primary-navy">{label}</h3>
       <p className="text-sm text-gray-600">{description}</p>
       <p className="text-xs text-gray-500">Supports .dcm and .dicom files</p>
       <span className="btn-secondary mt-4">Browse Files</span>
