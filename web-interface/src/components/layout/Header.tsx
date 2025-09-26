@@ -37,6 +37,7 @@ export function Header() {
         <button
           className="md:hidden inline-flex items-center justify-center rounded-md border border-gray-200 p-2 text-gray-600"
           onClick={() => setIsOpen((prev) => !prev)}
+          aria-label="Toggle navigation menu"
         >
           <Bars3BottomRightIcon className="h-6 w-6" />
         </button>
