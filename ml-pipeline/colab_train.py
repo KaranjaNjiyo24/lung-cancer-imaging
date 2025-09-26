@@ -71,18 +71,19 @@ def train_epoch(model, dataloader, criterion, optimizer, device, epoch):
     pbar = tqdm(dataloader, desc=f'Epoch {epoch}')
     
     for batch_idx, batch in enumerate(pbar):
-        # New format: modalities are direct keys in batch
+        # NEW FORMAT: Extract modality tensors directly from batch
         model_input = {}
         
-        # Extract modality tensors and move to device
-        for key, value in batch.items():
-            if isinstance(value, torch.Tensor) and key not in ['patient_id', 'session_id']:
-                model_input[key] = value.to(device)
-        
+        # Debug first batch to see what we're getting
         if batch_idx == 0:
-            print(f"Available modalities: {list(model_input.keys())}")
-            for mod, tensor in model_input.items():
-                print(f"{mod}: {tensor.shape}")
+            print(f"Debug - Batch keys: {list(batch.keys())}")
+        
+        # Extract modality tensors (ct, pet) and move to device
+        for key, value in batch.items():
+            if isinstance(value, torch.Tensor) and key in ['ct', 'pet']:
+                model_input[key] = value.to(device)
+                if batch_idx == 0:
+                    print(f"Loaded {key}: {value.shape}")
         
         if not model_input:
             print(f"Skipping batch {batch_idx} - no modality tensors found")
@@ -94,7 +95,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, epoch):
         
         # Forward pass
         optimizer.zero_grad()
-        outputs = model(model_input)  
+        outputs = model(model_input)
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
@@ -113,6 +114,9 @@ def train_epoch(model, dataloader, criterion, optimizer, device, epoch):
         if batch_idx % 10 == 0:
             torch.cuda.empty_cache()
     
+    if total == 0:
+        return 0.0, 0.0
+        
     epoch_loss = running_loss / len(dataloader)
     epoch_acc = 100. * correct / total
     return epoch_loss, epoch_acc
@@ -126,10 +130,10 @@ def validate(model, dataloader, criterion, device):
     
     with torch.no_grad():
         for batch in tqdm(dataloader, desc='Validation'):
-            # Extract modality tensors
+            # Extract modality tensors directly
             model_input = {}
             for key, value in batch.items():
-                if isinstance(value, torch.Tensor) and key not in ['patient_id', 'session_id']:
+                if isinstance(value, torch.Tensor) and key in ['ct', 'pet']:
                     model_input[key] = value.to(device)
             
             if not model_input:
