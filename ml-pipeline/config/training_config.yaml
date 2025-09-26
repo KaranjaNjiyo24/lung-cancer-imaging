@@ -1,38 +1,22 @@
-# Training Configuration
 data:
-  root_path: "/content/drive/MyDrive/NSCLC_Dataset"
-  metadata_csv: "/content/drive/MyDrive/metadata.csv"
-  image_size: [128, 128, 64]  # [H, W, D] - adjust based on GPU memory
-  batch_size: 2  # Start small for 98GB dataset
-  num_workers: 2
-  pin_memory: true
+  root_path: "/content/drive/MyDrive/ANDREW/ANDREW/manifest-1754856038374/NSCLC Radiogenomics"
+  metadata_csv: "/content/drive/MyDrive/ANDREW/ANDREW/manifest-1754856038374/metadata.csv"
+  clinical_csv: "/content/drive/MyDrive/ANDREW/ANDREW/manifest-1754856038374/NSCLCR01Radiogenomic_DATA_LABELS_2018-05-22_1500-shifted.csv"
+  image_size: [64, 64, 32]
+  batch_size: 1
+  num_workers: 0
+  pin_memory: false
 
 model:
   architecture: "multimodal_resnet3d"
-  num_classes: 2  # Adjust based on your classification task
+  num_classes: 2
   hidden_dim: 512
   dropout: 0.3
 
 training:
-  epochs: 50
+  epochs: 2
   learning_rate: 0.001
   weight_decay: 0.0001
   optimizer: "adam"
-  scheduler: "cosine"
-  patience: 10  # Early stopping patience
-  
-  # Checkpointing
-  save_every: 5  # Save checkpoint every N epochs
+  save_every: 5
   checkpoint_dir: "/content/drive/MyDrive/checkpoints"
-
-augmentation:
-  enabled: true
-  rotation_range: 10  # degrees
-  scaling_range: 0.1
-  intensity_shift: 0.1
-  noise_std: 0.05
-
-logging:
-  level: "INFO"
-  log_dir: "logs"
-  use_wandb: false  # Set to true if using wandb

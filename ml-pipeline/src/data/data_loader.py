@@ -155,6 +155,8 @@ class NestedDICOMDataset(Dataset):
     def _load_single_sample(self, sample: SeriesSample) -> Dict[str, object]:
         volume = self._volume_loader(sample.dicom_files)
         volume = self._apply_transform(volume, sample.metadata)
+        if len(volume.shape) == 3:
+            volume = np.expand_dims(volume, axis=0)
         modality_key = sample.modality.lower()
         return {
             "patient_id": sample.patient_id,
@@ -174,6 +176,8 @@ class NestedDICOMDataset(Dataset):
             series_sample = series_sample  # type: ignore[assignment]
             volume = self._volume_loader(series_sample.dicom_files)
             volume = self._apply_transform(volume, series_sample.metadata)
+            if len(volume.shape) == 3:
+                volume = np.expand_dims(volume, axis=0)
             modality_key = modality.lower()
             model_input[modality_key] = volume
             metadata_output[modality_key] = series_sample.metadata
